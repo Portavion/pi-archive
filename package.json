@@ -1,0 +1,8 @@
+{
+  "name": "pi-archive-extension",
+  "version": "0.0.1",
+  "keywords": ["pi-package"],
+  "pi": {
+    "extensions": ["./extensions"]
+  }
+}
