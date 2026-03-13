@@ -89,21 +89,52 @@ function formatAge(date: Date): string {
 	return `${Math.floor(diffDays / 365)}y`;
 }
 
-function getArchiveDestination(sessionPath: string, sessionDir: string): string {
-	const candidateRoots = [sessionDir, DEFAULT_SESSION_DIR];
+function getDefaultSessionDirForCwd(cwd: string): string {
+	const safePath = `--${cwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
+	return join(DEFAULT_SESSION_DIR, safePath);
+}
 
-	for (const root of candidateRoots) {
-		if (!isWithin(root, sessionPath)) continue;
-		return join(ARCHIVE_DIR, relative(root, sessionPath));
+async function readSessionHeader(sessionPath: string): Promise<{ cwd?: string } | null> {
+	try {
+		const content = await readFile(sessionPath, "utf8");
+		const firstLine = content
+			.split("\n")
+			.map((line) => line.trim())
+			.find((line) => line.length > 0);
+		if (!firstLine) {
+			return null;
+		}
+		return JSON.parse(firstLine) as { cwd?: string };
+	} catch {
+		return null;
+	}
+}
+
+function getArchiveDestination(sessionPath: string, sessionDir: string): string {
+	if (isWithin(DEFAULT_SESSION_DIR, sessionPath)) {
+		return join(ARCHIVE_DIR, relative(DEFAULT_SESSION_DIR, sessionPath));
+	}
+
+	if (isWithin(sessionDir, sessionPath)) {
+		return join(ARCHIVE_DIR, relative(sessionDir, sessionPath));
 	}
 
 	return join(ARCHIVE_DIR, basename(sessionPath));
 }
 
-function getUnarchiveDestination(sessionPath: string): string {
+async function getUnarchiveDestination(sessionPath: string): Promise<string> {
 	if (isWithin(ARCHIVE_DIR, sessionPath)) {
-		return join(DEFAULT_SESSION_DIR, relative(ARCHIVE_DIR, sessionPath));
+		const archivedRelativePath = relative(ARCHIVE_DIR, sessionPath);
+		if (dirname(archivedRelativePath) !== ".") {
+			return join(DEFAULT_SESSION_DIR, archivedRelativePath);
+		}
 	}
+
+	const header = await readSessionHeader(sessionPath);
+	if (header?.cwd) {
+		return join(getDefaultSessionDirForCwd(header.cwd), basename(sessionPath));
+	}
+
 	return join(DEFAULT_SESSION_DIR, basename(sessionPath));
 }
 
@@ -145,7 +176,7 @@ async function archiveSessionFile(sessionPath: string, sessionDir: string): Prom
 }
 
 async function unarchiveSessionFile(sessionPath: string): Promise<void> {
-	const destinationPath = getUniqueDestination(getUnarchiveDestination(sessionPath));
+	const destinationPath = getUniqueDestination(await getUnarchiveDestination(sessionPath));
 	await moveFile(sessionPath, destinationPath);
 }
 
