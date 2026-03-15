@@ -304,7 +304,7 @@ class SessionManagerSelector extends Container implements Focusable {
 	private processing = false;
 	private statusMessage: StatusMessage = null;
 	private currentSessions: SessionInfo[] = [];
-	private allSessions: SessionInfo[] | null = null;
+	private allSessions: SessionInfo[] = [];
 	private visibleSessions: SessionInfo[] = [];
 
 	constructor(options: {
@@ -357,15 +357,11 @@ class SessionManagerSelector extends Container implements Focusable {
 	}
 
 	private async ensureAllSessionsLoaded(): Promise<void> {
-		if (this.allSessions !== null) {
-			return;
-		}
 		this.loading = true;
 		this.statusMessage = null;
 		this.requestRender();
 		try {
 			this.allSessions = await this.allSessionsLoader();
-			this.refreshVisibleSessions();
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			this.statusMessage = { type: "error", message: `Failed to load sessions: ${message}` };
@@ -376,7 +372,7 @@ class SessionManagerSelector extends Container implements Focusable {
 	}
 
 	private getScopedSessions(): SessionInfo[] {
-		return this.scope === "all" ? (this.allSessions ?? []) : this.currentSessions;
+		return this.scope === "all" ? this.allSessions : this.currentSessions;
 	}
 
 	private refreshVisibleSessions(): void {
@@ -425,16 +421,15 @@ class SessionManagerSelector extends Container implements Focusable {
 			await this.ensureAllSessionsLoaded();
 		} else {
 			this.scope = "current";
-			this.refreshVisibleSessions();
-			this.requestRender();
 		}
+
+		this.refreshVisibleSessions();
+		this.requestRender();
 	}
 
 	private removeProcessedSessions(paths: Set<string>): void {
 		this.currentSessions = this.currentSessions.filter((session) => !paths.has(session.path));
-		if (this.allSessions) {
-			this.allSessions = this.allSessions.filter((session) => !paths.has(session.path));
-		}
+		this.allSessions = this.allSessions.filter((session) => !paths.has(session.path));
 		for (const path of paths) {
 			this.selectedPaths.delete(path);
 		}
