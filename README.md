@@ -20,6 +20,7 @@ Open a multi-select session picker for active sessions.
 - `Ctrl+D`: archive selected sessions, or the highlighted session if none are selected
 - `Tab`: switch between current-folder and all-sessions views
 - `Ctrl+P`: toggle cwd/path display
+- `Ctrl+S`: toggle name sort ascending/descending
 - `Esc` / `Ctrl+C`: close
 
 ### `/unarchive`
@@ -30,6 +31,7 @@ Open a multi-select picker for archived sessions.
 - `Ctrl+D`: unarchive selected sessions, or the highlighted session if none are selected
 - `Tab`: switch between current-folder archive and all archived sessions
 - `Ctrl+P`: toggle cwd/path display
+- `Ctrl+S`: toggle name sort ascending/descending
 - `Esc` / `Ctrl+C`: close
 
 ## Installation

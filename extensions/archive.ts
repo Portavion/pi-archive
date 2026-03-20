@@ -8,6 +8,7 @@
  * - Ctrl+D: apply action to all selected sessions, or the highlighted session if none selected
  * - Tab: toggle current-folder/all-sessions scope
  * - Ctrl+P: toggle full path display
+ * - Ctrl+S: toggle name sort (ascending/descending)
  * - Esc/Ctrl+C: close
  */
 
@@ -36,6 +37,7 @@ const MAX_VISIBLE = 12;
 type SessionScope = "current" | "all";
 type StatusMessage = { type: "info" | "error"; message: string } | null;
 type Mode = "archive" | "unarchive";
+type SortMode = "modified" | "name-asc" | "name-desc";
 
 interface SessionManagerUIOptions {
 	title: string;
@@ -92,6 +94,26 @@ function formatAge(date: Date): string {
 function getDefaultSessionDirForCwd(cwd: string): string {
 	const safePath = `--${cwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
 	return join(DEFAULT_SESSION_DIR, safePath);
+}
+
+function getSessionSortName(session: SessionInfo): string {
+	return (session.name ?? session.firstMessage).replace(/[\x00-\x1f\x7f]/g, " ").trim() || "(empty)";
+}
+
+function sortSessions(sessions: SessionInfo[], sortMode: SortMode): SessionInfo[] {
+	const sorted = [...sessions];
+	if (sortMode === "modified") {
+		return sorted.sort((a, b) => b.modified.getTime() - a.modified.getTime());
+	}
+
+	const direction = sortMode === "name-asc" ? 1 : -1;
+	return sorted.sort((a, b) => {
+		const byName = getSessionSortName(a).localeCompare(getSessionSortName(b), undefined, { sensitivity: "base" });
+		if (byName !== 0) {
+			return byName * direction;
+		}
+		return (b.modified.getTime() - a.modified.getTime()) * direction;
+	});
 }
 
 async function readSessionHeader(sessionPath: string): Promise<{ cwd?: string } | null> {
@@ -267,22 +289,19 @@ async function listArchivedSessions(cwd?: string): Promise<SessionInfo[]> {
 	const sessions = (await Promise.all(files.map((file) => readArchivedSessionInfo(file)))).filter(
 		(session): session is SessionInfo => session !== null,
 	);
-	const filtered = cwd ? sessions.filter((session) => session.cwd === cwd) : sessions;
-	return filtered.sort((a, b) => b.modified.getTime() - a.modified.getTime());
+	return cwd ? sessions.filter((session) => session.cwd === cwd) : sessions;
 }
 
-function filterSessions(sessions: SessionInfo[], query: string): SessionInfo[] {
+function filterSessions(sessions: SessionInfo[], query: string, sortMode: SortMode): SessionInfo[] {
 	const trimmed = query.trim().toLowerCase();
-	if (!trimmed) {
-		return [...sessions].sort((a, b) => b.modified.getTime() - a.modified.getTime());
-	}
-
-	return sessions
-		.filter((session) => {
-			const haystack = `${session.name ?? ""} ${session.firstMessage} ${session.cwd} ${session.path}`.toLowerCase();
-			return haystack.includes(trimmed);
-		})
-		.sort((a, b) => b.modified.getTime() - a.modified.getTime());
+	const filtered =
+		trimmed.length === 0
+			? sessions
+			: sessions.filter((session) => {
+					const haystack = `${session.name ?? ""} ${session.firstMessage} ${session.cwd} ${session.path}`.toLowerCase();
+					return haystack.includes(trimmed);
+			  });
+	return sortSessions(filtered, sortMode);
 }
 
 class SessionManagerSelector extends Container implements Focusable {
@@ -299,6 +318,7 @@ class SessionManagerSelector extends Container implements Focusable {
 	private _focused = false;
 	private scope: SessionScope = "current";
 	private showPath = false;
+	private sortMode: SortMode = "modified";
 	private selectedIndex = 0;
 	private loading = true;
 	private processing = false;
@@ -376,7 +396,7 @@ class SessionManagerSelector extends Container implements Focusable {
 	}
 
 	private refreshVisibleSessions(): void {
-		this.visibleSessions = filterSessions(this.getScopedSessions(), this.searchInput.getValue());
+		this.visibleSessions = filterSessions(this.getScopedSessions(), this.searchInput.getValue(), this.sortMode);
 		if (this.selectedIndex >= this.visibleSessions.length) {
 			this.selectedIndex = Math.max(0, this.visibleSessions.length - 1);
 		}
@@ -423,6 +443,12 @@ class SessionManagerSelector extends Container implements Focusable {
 			this.scope = "current";
 		}
 
+		this.refreshVisibleSessions();
+		this.requestRender();
+	}
+
+	private toggleSort(): void {
+		this.sortMode = this.sortMode === "name-asc" ? "name-desc" : "name-asc";
 		this.refreshVisibleSessions();
 		this.requestRender();
 	}
@@ -502,6 +528,11 @@ class SessionManagerSelector extends Container implements Focusable {
 			return;
 		}
 
+		if (matchesKey(data, Key.ctrl("s"))) {
+			this.toggleSort();
+			return;
+		}
+
 		if (matchesKey(data, Key.ctrl("d"))) {
 			void this.applySelected();
 			return;
@@ -533,7 +564,8 @@ class SessionManagerSelector extends Container implements Focusable {
 
 		const scopeText = this.scope === "current" ? this.options.currentScopeLabel : this.options.allScopeLabel;
 		const selectedCount = this.selectedPaths.size;
-		const summary = `${scopeText} · selected ${selectedCount} · ctrl+d ${this.options.actionVerb} · enter toggle · tab scope · ctrl+p path`;
+		const sortText = this.sortMode === "name-asc" ? "name ↑" : this.sortMode === "name-desc" ? "name ↓" : "recent";
+		const summary = `${scopeText} · ${sortText} · selected ${selectedCount} · ctrl+d ${this.options.actionVerb} · enter toggle · tab scope · ctrl+p path · ctrl+s sort`;
 		this.addChild(new Text(truncateToWidth(summary, Math.max(0, width - 2), "…"), 1, 0));
 		this.addChild(new Spacer(1));
 
@@ -555,7 +587,7 @@ class SessionManagerSelector extends Container implements Focusable {
 				const protectedSession = this.isProtected(session);
 				const mark = protectedSession ? "[-]" : selected ? "[x]" : "[ ]";
 				const cursor = highlighted ? "> " : "  ";
-				const name = (session.name ?? session.firstMessage).replace(/[\x00-\x1f\x7f]/g, " ").trim() || "(empty)";
+				const name = getSessionSortName(session);
 				const meta = `${session.messageCount} ${formatAge(session.modified)}`;
 				const pathText = this.showPath ? shortenPath(session.path) : shortenPath(session.cwd);
 				const leftPrefix = `${cursor}${mark} ${name}`;
@@ -595,7 +627,13 @@ function createAllArchiveLoader(): () => Promise<SessionInfo[]> {
 	return () => listArchivedSessions();
 }
 
-export default function archiveExtension(pi: ExtensionAPI) {
+/**
+ * Register archive and unarchive session picker commands.
+ *
+ * @param pi Extension API used to register Pi commands.
+ * @returns Nothing.
+ */
+export default function archiveExtension(pi: ExtensionAPI): void {
 	const register = (command: Mode) => {
 		const ui = MODE_OPTIONS[command];
 
