@@ -78,6 +78,26 @@ function shortenPath(path: string): string {
 	return path;
 }
 
+function getSessionFolderLabel(session: SessionListItem): string {
+	if (session.cwd) {
+		const folderName = basename(session.cwd.replace(/[/\\]+$/, ""));
+		if (folderName) {
+			return folderName;
+		}
+		return shortenPath(session.cwd);
+	}
+
+	if (isWithin(ARCHIVE_DIR, session.path)) {
+		const archivedPath = relative(ARCHIVE_DIR, session.path);
+		const archiveFolder = basename(dirname(archivedPath));
+		if (archiveFolder && archiveFolder !== ".") {
+			return archiveFolder;
+		}
+	}
+
+	return basename(dirname(session.path));
+}
+
 function formatAge(date: Date): string {
 	const diffMs = Date.now() - date.getTime();
 	const diffMins = Math.floor(diffMs / 60000);
@@ -362,10 +382,31 @@ function filterSessions(sessions: SessionListItem[], query: string, sortMode: So
 		trimmed.length === 0
 			? sessions
 			: sessions.filter((session) => {
-					const haystack = `${session.name ?? ""} ${session.firstMessage} ${session.cwd} ${session.path}`.toLowerCase();
+					const haystack = `${session.name ?? ""} ${session.firstMessage} ${session.cwd} ${session.path} ${getSessionFolderLabel(session)}`.toLowerCase();
 					return haystack.includes(trimmed);
 			  });
 	return sortSessions(filtered, sortMode);
+}
+
+function getSessionRightText(session: SessionListItem, leftPrefixWidth: number, width: number, showPath: boolean): string {
+	const costText = formatSessionCost(session.totalCost).padStart(COST_COLUMN_WIDTH);
+	const detailedMetaText = `${session.messageCount} ${formatAge(session.modified)}`;
+	const compactMetaText = formatAge(session.modified);
+	const locationText = showPath ? shortenPath(session.path) : getSessionFolderLabel(session);
+	const rightTextCandidates = [
+		`${locationText} ${detailedMetaText} ${costText}`,
+		`${locationText} ${compactMetaText} ${costText}`,
+		`${compactMetaText} ${costText}`,
+		costText,
+	];
+
+	for (const candidate of rightTextCandidates) {
+		if (width - visibleWidth(candidate) - 1 >= leftPrefixWidth) {
+			return candidate;
+		}
+	}
+
+	return costText;
 }
 
 class SessionManagerSelector extends Container implements Focusable {
@@ -629,7 +670,7 @@ class SessionManagerSelector extends Container implements Focusable {
 		const scopeText = this.scope === "current" ? this.options.currentScopeLabel : this.options.allScopeLabel;
 		const selectedCount = this.selectedPaths.size;
 		const sortText = this.sortMode === "name-asc" ? "name ↑" : this.sortMode === "name-desc" ? "name ↓" : "recent";
-		const summary = `${scopeText} · ${sortText} · selected ${selectedCount} · ctrl+d ${this.options.actionVerb} · enter toggle · tab scope · ctrl+p path · ctrl+s sort`;
+		const summary = `${scopeText} · ${sortText} · selected ${selectedCount} · ctrl+d ${this.options.actionVerb} · enter toggle · tab scope · ctrl+p full path · ctrl+s sort`;
 		this.addChild(new Text(truncateToWidth(summary, Math.max(0, width - 2), "…"), 1, 0));
 		this.addChild(new Spacer(1));
 
@@ -656,11 +697,8 @@ class SessionManagerSelector extends Container implements Focusable {
 				const mark = protectedSession ? "[-]" : selected ? "[x]" : "[ ]";
 				const cursor = highlighted ? "> " : "  ";
 				const name = getSessionSortName(session);
-				const meta = `${session.messageCount} ${formatAge(session.modified)}`;
-				const pathText = this.showPath ? shortenPath(session.path) : shortenPath(session.cwd);
-				const costText = formatSessionCost(session.totalCost).padStart(COST_COLUMN_WIDTH);
 				const leftPrefix = `${cursor}${mark} ${name}`;
-				const rightText = `${pathText} ${meta} ${costText}`;
+				const rightText = getSessionRightText(session, visibleWidth(leftPrefix), width, this.showPath);
 				const available = Math.max(8, width - visibleWidth(rightText) - 5);
 				const leftText = truncateToWidth(leftPrefix, available, "…");
 				const spacing = Math.max(1, width - visibleWidth(leftText) - visibleWidth(rightText));
