@@ -4,7 +4,7 @@
  * Adds /archive and /unarchive commands for multi-select session management.
  *
  * Controls:
- * - Enter: toggle selection on the highlighted session
+ * - Enter: toggle selection on the highlighted session or toggle a fold header
  * - Ctrl+D: apply action to all selected sessions, or the highlighted session if none selected
  * - Tab: toggle current-folder/all-sessions scope
  * - Ctrl+P: toggle full path display
@@ -40,6 +40,10 @@ type StatusMessage = { type: "info" | "error"; message: string } | null;
 type Mode = "archive" | "unarchive";
 type SortMode = "modified" | "name-asc" | "name-desc";
 type SessionListItem = SessionInfo & { totalCost: number | null };
+
+type VisibleListItem =
+	| { type: "group"; groupKey: string; label: string; sessionCount: number; expanded: boolean }
+	| { type: "session"; session: SessionListItem; groupKey?: string };
 
 interface SessionManagerUIOptions {
 	title: string;
@@ -120,6 +124,11 @@ function getDefaultSessionDirForCwd(cwd: string): string {
 
 function getSessionSortName(session: SessionInfo): string {
 	return (session.name ?? session.firstMessage).replace(/[\x00-\x1f\x7f]/g, " ").trim() || "(empty)";
+}
+
+function getIssueNumberPrefix(session: SessionListItem): string | null {
+	const match = getSessionSortName(session).match(/^#(\d+)\b/);
+	return match?.[1] ?? null;
 }
 
 function formatSessionCost(totalCost: number | null): string {
@@ -430,7 +439,8 @@ class SessionManagerSelector extends Container implements Focusable {
 	private statusMessage: StatusMessage = null;
 	private currentSessions: SessionListItem[] = [];
 	private allSessions: SessionListItem[] = [];
-	private visibleSessions: SessionListItem[] = [];
+	private visibleItems: VisibleListItem[] = [];
+	private expandedGroupKeys = new Set<string>();
 
 	constructor(options: {
 		currentSessionsLoader: () => Promise<SessionListItem[]>;
@@ -501,9 +511,51 @@ class SessionManagerSelector extends Container implements Focusable {
 	}
 
 	private refreshVisibleSessions(): void {
-		this.visibleSessions = filterSessions(this.getScopedSessions(), this.searchInput.getValue(), this.sortMode);
-		if (this.selectedIndex >= this.visibleSessions.length) {
-			this.selectedIndex = Math.max(0, this.visibleSessions.length - 1);
+		const scopedSessions = this.getScopedSessions();
+		const filteredSessions = filterSessions(scopedSessions, this.searchInput.getValue(), this.sortMode);
+		const autoExpandGroups = this.searchInput.getValue().trim().length > 0;
+		const groupedSessions = new Map<string, SessionListItem[]>();
+		const groupOrder: string[] = [];
+		const ungroupedSessions: SessionListItem[] = [];
+
+		for (const session of filteredSessions) {
+			const issueNumber = getIssueNumberPrefix(session);
+			if (!issueNumber) {
+				ungroupedSessions.push(session);
+				continue;
+			}
+
+			if (!groupedSessions.has(issueNumber)) {
+				groupedSessions.set(issueNumber, []);
+				groupOrder.push(issueNumber);
+			}
+			groupedSessions.get(issueNumber)!.push(session);
+		}
+
+		this.visibleItems = [];
+		for (const issueNumber of groupOrder) {
+			const sessionsInGroup = groupedSessions.get(issueNumber)!;
+			const expanded = autoExpandGroups || this.expandedGroupKeys.has(issueNumber);
+			this.visibleItems.push({
+				type: "group",
+				groupKey: issueNumber,
+				label: `#${issueNumber}`,
+				sessionCount: sessionsInGroup.length,
+				expanded,
+			});
+			if (expanded) {
+				for (const session of sessionsInGroup) {
+					this.visibleItems.push({ type: "session", session, groupKey: issueNumber });
+				}
+			}
+		}
+
+		for (const session of ungroupedSessions) {
+			this.visibleItems.push({ type: "session", session });
+		}
+
+		if (this.selectedIndex >= this.visibleItems.length) {
+			this.selectedIndex = Math.max(0, this.visibleItems.length - 1);
 		}
 		this.pruneSelection();
 	}
@@ -517,17 +569,43 @@ class SessionManagerSelector extends Container implements Focusable {
 		}
 	}
 
+	private getHighlightedItem(): VisibleListItem | undefined {
+		return this.visibleItems[this.selectedIndex];
+	}
+
 	private getHighlightedSession(): SessionListItem | undefined {
-		return this.visibleSessions[this.selectedIndex];
+		const highlighted = this.getHighlightedItem();
+		return highlighted?.type === "session" ? highlighted.session : undefined;
 	}
 
 	private isProtected(session: SessionInfo): boolean {
 		return !this.options.archiveDirMode && this.currentSessionPath === session.path;
 	}
 
+	private toggleGroup(groupKey: string): void {
+		if (this.expandedGroupKeys.has(groupKey)) {
+			this.expandedGroupKeys.delete(groupKey);
+		} else {
+			this.expandedGroupKeys.add(groupKey);
+		}
+		this.refreshVisibleSessions();
+	}
+
 	private toggleHighlighted(): void {
-		const session = this.getHighlightedSession();
-		if (!session) return;
+		const item = this.getHighlightedItem();
+		if (!item) return;
+
+		if (item.type === "group") {
+			if (this.searchInput.getValue().trim().length > 0) {
+				this.statusMessage = { type: "info", message: "Clear search to collapse issue folds" };
+				return;
+			}
+			this.toggleGroup(item.groupKey);
+			this.statusMessage = null;
+			return;
+		}
+
+		const session = item.session;
 		if (this.isProtected(session)) {
 			this.statusMessage = { type: "error", message: `Cannot ${this.options.actionVerb} the currently active session` };
 			return;
@@ -650,7 +728,7 @@ class SessionManagerSelector extends Container implements Focusable {
 		}
 
 		if (matchesKey(data, Key.down)) {
-			this.selectedIndex = Math.min(this.visibleSessions.length - 1, this.selectedIndex + 1);
+			this.selectedIndex = Math.min(this.visibleItems.length - 1, this.selectedIndex + 1);
 			this.requestRender();
 			return;
 		}
@@ -670,13 +748,13 @@ class SessionManagerSelector extends Container implements Focusable {
 		const scopeText = this.scope === "current" ? this.options.currentScopeLabel : this.options.allScopeLabel;
 		const selectedCount = this.selectedPaths.size;
 		const sortText = this.sortMode === "name-asc" ? "name ↑" : this.sortMode === "name-desc" ? "name ↓" : "recent";
-		const summary = `${scopeText} · ${sortText} · selected ${selectedCount} · ctrl+d ${this.options.actionVerb} · enter toggle · tab scope · ctrl+p full path · ctrl+s sort`;
+		const summary = `${scopeText} · ${sortText} · selected ${selectedCount} · ctrl+d ${this.options.actionVerb} · enter select/fold · tab scope · ctrl+p full path · ctrl+s sort`;
 		this.addChild(new Text(truncateToWidth(summary, Math.max(0, width - 2), "…"), 1, 0));
 		this.addChild(new Spacer(1));
 
 		if (this.loading) {
 			this.addChild(new Text("Loading...", 1, 0));
-		} else if (this.visibleSessions.length === 0) {
+		} else if (this.visibleItems.length === 0) {
 			this.addChild(new Text("No sessions found", 1, 0));
 		} else {
 			const costHeader = "Cost".padStart(COST_COLUMN_WIDTH);
@@ -685,24 +763,40 @@ class SessionManagerSelector extends Container implements Focusable {
 
 			const startIndex = Math.max(
 				0,
-				Math.min(this.selectedIndex - Math.floor(MAX_VISIBLE / 2), this.visibleSessions.length - MAX_VISIBLE),
+				Math.min(this.selectedIndex - Math.floor(MAX_VISIBLE / 2), this.visibleItems.length - MAX_VISIBLE),
 			);
-			const endIndex = Math.min(this.visibleSessions.length, startIndex + MAX_VISIBLE);
+			const endIndex = Math.min(this.visibleItems.length, startIndex + MAX_VISIBLE);
 
 			for (let index = startIndex; index < endIndex; index++) {
-				const session = this.visibleSessions[index]!;
+				const item = this.visibleItems[index]!;
 				const highlighted = index === this.selectedIndex;
-				const selected = this.selectedPaths.has(session.path);
-				const protectedSession = this.isProtected(session);
-				const mark = protectedSession ? "[-]" : selected ? "[x]" : "[ ]";
-				const cursor = highlighted ? "> " : "  ";
-				const name = getSessionSortName(session);
-				const leftPrefix = `${cursor}${mark} ${name}`;
-				const rightText = getSessionRightText(session, visibleWidth(leftPrefix), width, this.showPath);
-				const available = Math.max(8, width - visibleWidth(rightText) - 5);
-				const leftText = truncateToWidth(leftPrefix, available, "…");
-				const spacing = Math.max(1, width - visibleWidth(leftText) - visibleWidth(rightText));
-				let line = `${leftText}${" ".repeat(spacing)}${rightText}`;
+				let line: string;
+
+				if (item.type === "group") {
+					const cursor = highlighted ? "> " : "  ";
+					const stateIcon = item.expanded ? "▾" : "▸";
+					const leftPrefix = `${cursor}${stateIcon} ${item.label}`;
+					const rightText = `${item.sessionCount} session${item.sessionCount === 1 ? "" : "s"}`;
+					const available = Math.max(8, width - visibleWidth(rightText) - 5);
+					const leftText = truncateToWidth(leftPrefix, available, "…");
+					const spacing = Math.max(1, width - visibleWidth(leftText) - visibleWidth(rightText));
+					line = `${leftText}${" ".repeat(spacing)}${rightText}`;
+				} else {
+					const session = item.session;
+					const selected = this.selectedPaths.has(session.path);
+					const protectedSession = this.isProtected(session);
+					const mark = protectedSession ? "[-]" : selected ? "[x]" : "[ ]";
+					const cursor = highlighted ? "> " : "  ";
+					const nesting = item.groupKey ? "  " : "";
+					const name = getSessionSortName(session);
+					const leftPrefix = `${nesting}${cursor}${mark} ${name}`;
+					const rightText = getSessionRightText(session, visibleWidth(leftPrefix), width, this.showPath);
+					const available = Math.max(8, width - visibleWidth(rightText) - 5);
+					const leftText = truncateToWidth(leftPrefix, available, "…");
+					const spacing = Math.max(1, width - visibleWidth(leftText) - visibleWidth(rightText));
+					line = `${leftText}${" ".repeat(spacing)}${rightText}`;
+				}
+
 				if (highlighted) {
 					line = `\u001b[7m${truncateToWidth(line, width)}\u001b[27m`;
 				} else {
@@ -711,9 +805,9 @@ class SessionManagerSelector extends Container implements Focusable {
 				this.addChild(new Text(line, 0, 0));
 			}
 
-			if (this.visibleSessions.length > MAX_VISIBLE) {
+			if (this.visibleItems.length > MAX_VISIBLE) {
 				this.addChild(new Spacer(1));
-				this.addChild(new Text(`(${this.selectedIndex + 1}/${this.visibleSessions.length})`, 1, 0));
+				this.addChild(new Text(`(${this.selectedIndex + 1}/${this.visibleItems.length})`, 1, 0));
 			}
 		}
 

@@ -2,6 +2,8 @@
 
 `pi-archive` is a Pi package that adds `/archive` and `/unarchive` commands for moving session files in and out of Pi's archive directory.
 
+Sessions whose names start with a GitLab issue prefix like `#1234` are grouped into collapsible folds in the picker, collapsed by default.
+
 The package stores archived sessions in Pi's config directory:
 
 - `~/.pi/agent/session-archive/`
@@ -16,7 +18,7 @@ It restores unarchived sessions back to:
 
 Open a multi-select session picker for active sessions.
 
-- `Enter`: toggle selection
+- `Enter`: toggle selection, or expand/collapse a highlighted issue fold
 - `Ctrl+D`: archive selected sessions, or the highlighted session if none are selected
 - `Tab`: switch between current-folder and all-sessions views
 - `Ctrl+P`: toggle full session path display
@@ -27,7 +29,7 @@ Open a multi-select session picker for active sessions.
 
 Open a multi-select picker for archived sessions.
 
-- `Enter`: toggle selection
+- `Enter`: toggle selection, or expand/collapse a highlighted issue fold
 - `Ctrl+D`: unarchive selected sessions, or the highlighted session if none are selected
 - `Tab`: switch between current-folder archive and all archived sessions
 - `Ctrl+P`: toggle full session path display
