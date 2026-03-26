@@ -33,11 +33,13 @@ const AGENT_DIR = getAgentDir();
 const DEFAULT_SESSION_DIR = join(AGENT_DIR, "sessions");
 const ARCHIVE_DIR = join(AGENT_DIR, "session-archive");
 const MAX_VISIBLE = 12;
+const COST_COLUMN_WIDTH = 10;
 
 type SessionScope = "current" | "all";
 type StatusMessage = { type: "info" | "error"; message: string } | null;
 type Mode = "archive" | "unarchive";
 type SortMode = "modified" | "name-asc" | "name-desc";
+type SessionListItem = SessionInfo & { totalCost: number | null };
 
 interface SessionManagerUIOptions {
 	title: string;
@@ -100,7 +102,11 @@ function getSessionSortName(session: SessionInfo): string {
 	return (session.name ?? session.firstMessage).replace(/[\x00-\x1f\x7f]/g, " ").trim() || "(empty)";
 }
 
-function sortSessions(sessions: SessionInfo[], sortMode: SortMode): SessionInfo[] {
+function formatSessionCost(totalCost: number | null): string {
+	return totalCost === null ? "—" : `$${totalCost.toFixed(2)}`;
+}
+
+function sortSessions(sessions: SessionListItem[], sortMode: SortMode): SessionListItem[] {
 	const sorted = [...sessions];
 	if (sortMode === "modified") {
 		return sorted.sort((a, b) => b.modified.getTime() - a.modified.getTime());
@@ -130,6 +136,49 @@ async function readSessionHeader(sessionPath: string): Promise<{ cwd?: string } 
 	} catch {
 		return null;
 	}
+}
+
+async function readSessionTotalCost(sessionPath: string): Promise<number | null> {
+	try {
+		const content = await readFile(sessionPath, "utf8");
+		let totalCost = 0;
+		let hasCost = false;
+
+		for (const line of content.split("\n")) {
+			if (line.trim().length === 0) {
+				continue;
+			}
+			const entry = JSON.parse(line) as {
+				type?: string;
+				message?: {
+					role?: string;
+					usage?: {
+						cost?: {
+							total?: number;
+						};
+					};
+				};
+			};
+			const entryCost = entry.type === "message" && entry.message?.role === "assistant" ? entry.message.usage?.cost?.total : undefined;
+			if (typeof entryCost === "number" && Number.isFinite(entryCost)) {
+				totalCost += entryCost;
+				hasCost = true;
+			}
+		}
+
+		return hasCost ? totalCost : null;
+	} catch {
+		return null;
+	}
+}
+
+async function addSessionCosts(sessions: SessionInfo[]): Promise<SessionListItem[]> {
+	return Promise.all(
+		sessions.map(async (session) => ({
+			...session,
+			totalCost: await readSessionTotalCost(session.path),
+		})),
+	);
 }
 
 function getArchiveDestination(sessionPath: string, sessionDir: string): string {
@@ -220,7 +269,7 @@ async function walkJsonlFiles(dir: string): Promise<string[]> {
 	return files.flat();
 }
 
-async function readArchivedSessionInfo(sessionPath: string): Promise<SessionInfo | null> {
+async function readArchivedSessionInfo(sessionPath: string): Promise<SessionListItem | null> {
 	try {
 		const content = await readFile(sessionPath, "utf8");
 		const lines = content.split("\n").filter((line) => line.trim().length > 0);
@@ -234,6 +283,8 @@ async function readArchivedSessionInfo(sessionPath: string): Promise<SessionInfo
 		let allMessagesText = "";
 		let messageCount = 0;
 		let modified = header.timestamp ? new Date(header.timestamp) : new Date(0);
+		let totalCost = 0;
+		let hasCost = false;
 
 		for (const line of lines.slice(1)) {
 			const entry = JSON.parse(line) as {
@@ -243,6 +294,11 @@ async function readArchivedSessionInfo(sessionPath: string): Promise<SessionInfo
 				message?: {
 					role?: string;
 					content?: string | Array<{ type?: string; text?: string }>;
+					usage?: {
+						cost?: {
+							total?: number;
+						};
+					};
 				};
 			};
 			if (entry.timestamp) {
@@ -265,6 +321,13 @@ async function readArchivedSessionInfo(sessionPath: string): Promise<SessionInfo
 			if (!firstMessage && entry.message.role === "user") {
 				firstMessage = contentText;
 			}
+			if (entry.message.role === "assistant") {
+				const entryCost = entry.message.usage?.cost?.total;
+				if (typeof entryCost === "number" && Number.isFinite(entryCost)) {
+					totalCost += entryCost;
+					hasCost = true;
+				}
+			}
 			allMessagesText += `${contentText}\n`;
 		}
 
@@ -278,21 +341,22 @@ async function readArchivedSessionInfo(sessionPath: string): Promise<SessionInfo
 			messageCount,
 			firstMessage: firstMessage || name || basename(sessionPath),
 			allMessagesText: allMessagesText.trim(),
+			totalCost: hasCost ? totalCost : null,
 		};
 	} catch {
 		return null;
 	}
 }
 
-async function listArchivedSessions(cwd?: string): Promise<SessionInfo[]> {
+async function listArchivedSessions(cwd?: string): Promise<SessionListItem[]> {
 	const files = await walkJsonlFiles(ARCHIVE_DIR);
 	const sessions = (await Promise.all(files.map((file) => readArchivedSessionInfo(file)))).filter(
-		(session): session is SessionInfo => session !== null,
+		(session): session is SessionListItem => session !== null,
 	);
 	return cwd ? sessions.filter((session) => session.cwd === cwd) : sessions;
 }
 
-function filterSessions(sessions: SessionInfo[], query: string, sortMode: SortMode): SessionInfo[] {
+function filterSessions(sessions: SessionListItem[], query: string, sortMode: SortMode): SessionListItem[] {
 	const trimmed = query.trim().toLowerCase();
 	const filtered =
 		trimmed.length === 0
@@ -307,8 +371,8 @@ function filterSessions(sessions: SessionInfo[], query: string, sortMode: SortMo
 class SessionManagerSelector extends Container implements Focusable {
 	private readonly searchInput = new Input();
 	private readonly selectedPaths = new Set<string>();
-	private readonly currentSessionsLoader: () => Promise<SessionInfo[]>;
-	private readonly allSessionsLoader: () => Promise<SessionInfo[]>;
+	private readonly currentSessionsLoader: () => Promise<SessionListItem[]>;
+	private readonly allSessionsLoader: () => Promise<SessionListItem[]>;
 	private readonly applyToSessions: (sessionPaths: string[]) => Promise<{ processed: number; failed: number }>;
 	private readonly currentSessionPath?: string;
 	private readonly onDone: () => void;
@@ -323,13 +387,13 @@ class SessionManagerSelector extends Container implements Focusable {
 	private loading = true;
 	private processing = false;
 	private statusMessage: StatusMessage = null;
-	private currentSessions: SessionInfo[] = [];
-	private allSessions: SessionInfo[] = [];
-	private visibleSessions: SessionInfo[] = [];
+	private currentSessions: SessionListItem[] = [];
+	private allSessions: SessionListItem[] = [];
+	private visibleSessions: SessionListItem[] = [];
 
 	constructor(options: {
-		currentSessionsLoader: () => Promise<SessionInfo[]>;
-		allSessionsLoader: () => Promise<SessionInfo[]>;
+		currentSessionsLoader: () => Promise<SessionListItem[]>;
+		allSessionsLoader: () => Promise<SessionListItem[]>;
 		applyToSessions: (sessionPaths: string[]) => Promise<{ processed: number; failed: number }>;
 		currentSessionPath?: string;
 		onDone: () => void;
@@ -391,7 +455,7 @@ class SessionManagerSelector extends Container implements Focusable {
 		}
 	}
 
-	private getScopedSessions(): SessionInfo[] {
+	private getScopedSessions(): SessionListItem[] {
 		return this.scope === "all" ? this.allSessions : this.currentSessions;
 	}
 
@@ -412,7 +476,7 @@ class SessionManagerSelector extends Container implements Focusable {
 		}
 	}
 
-	private getHighlightedSession(): SessionInfo | undefined {
+	private getHighlightedSession(): SessionListItem | undefined {
 		return this.visibleSessions[this.selectedIndex];
 	}
 
@@ -574,6 +638,10 @@ class SessionManagerSelector extends Container implements Focusable {
 		} else if (this.visibleSessions.length === 0) {
 			this.addChild(new Text("No sessions found", 1, 0));
 		} else {
+			const costHeader = "Cost".padStart(COST_COLUMN_WIDTH);
+			this.addChild(new Text(`${" ".repeat(Math.max(0, width - COST_COLUMN_WIDTH))}${costHeader}`, 0, 0));
+			this.addChild(new Spacer(1));
+
 			const startIndex = Math.max(
 				0,
 				Math.min(this.selectedIndex - Math.floor(MAX_VISIBLE / 2), this.visibleSessions.length - MAX_VISIBLE),
@@ -590,8 +658,9 @@ class SessionManagerSelector extends Container implements Focusable {
 				const name = getSessionSortName(session);
 				const meta = `${session.messageCount} ${formatAge(session.modified)}`;
 				const pathText = this.showPath ? shortenPath(session.path) : shortenPath(session.cwd);
+				const costText = formatSessionCost(session.totalCost).padStart(COST_COLUMN_WIDTH);
 				const leftPrefix = `${cursor}${mark} ${name}`;
-				const rightText = `${pathText} ${meta}`;
+				const rightText = `${pathText} ${meta} ${costText}`;
 				const available = Math.max(8, width - visibleWidth(rightText) - 5);
 				const leftText = truncateToWidth(leftPrefix, available, "…");
 				const spacing = Math.max(1, width - visibleWidth(leftText) - visibleWidth(rightText));
@@ -619,11 +688,11 @@ class SessionManagerSelector extends Container implements Focusable {
 	}
 }
 
-function createCurrentArchiveLoader(cwd: string): () => Promise<SessionInfo[]> {
+function createCurrentArchiveLoader(cwd: string): () => Promise<SessionListItem[]> {
 	return () => listArchivedSessions(cwd);
 }
 
-function createAllArchiveLoader(): () => Promise<SessionInfo[]> {
+function createAllArchiveLoader(): () => Promise<SessionListItem[]> {
 	return () => listArchivedSessions();
 }
 
@@ -649,10 +718,10 @@ export default function archiveExtension(pi: ExtensionAPI): void {
 				const currentSessionPath = ctx.sessionManager.getSessionFile();
 				const currentSessionsLoader =
 					command === "archive"
-						? () => SessionManager.list(ctx.sessionManager.getCwd(), sessionDir)
+						? async () => addSessionCosts(await SessionManager.list(ctx.sessionManager.getCwd(), sessionDir))
 						: createCurrentArchiveLoader(ctx.sessionManager.getCwd());
 				const allSessionsLoader =
-					command === "archive" ? () => SessionManager.listAll() : createAllArchiveLoader();
+					command === "archive" ? async () => addSessionCosts(await SessionManager.listAll()) : createAllArchiveLoader();
 
 				await ctx.ui.custom<void>((tui, _theme, _kb, done) => {
 					const selector = new SessionManagerSelector({
